@@ -42,7 +42,7 @@ python3 scripts/seed_demo_data.py
 python3 dashboard.py
 ```
 
-Open: `http://127.0.0.1:1337`
+Open: `http://127.0.0.1:8080`
 
 ## Optional Collector Run
 
@@ -57,7 +57,7 @@ python3 collector.py
 - `SC_CURSOR_PATH` (default: `./data/journal.cursor`)
 - `SC_OFFSETS_PATH` (default: `./data/file_offsets.json`)
 - `SC_HOST` (default: `0.0.0.0`)
-- `SC_PORT` (default: `1337`)
+- `SC_PORT` (default: `8080`)
 - `ABUSEIPDB_API_KEY` (optional)
 - `MAP_TARGET_NAME` (optional)
 - `MAP_TARGET_LAT` (optional)

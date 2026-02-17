@@ -840,5 +840,5 @@ ensure_support_tables()
 
 if __name__ == '__main__':
     host = os.getenv('SC_HOST', '0.0.0.0')
-    port = int(os.getenv('SC_PORT', '1337'))
+    port = int(os.getenv('SC_PORT', '8080'))
     app.run(host=host, port=port)
