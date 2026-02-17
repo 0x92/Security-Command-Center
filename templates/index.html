@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Security Command Center</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts/map/js/world.js"></script>
+  <style>
+    :root {
+      --bg-1: #0a1220;
+      --bg-2: #0f1f2d;
+      --panel: rgba(11, 20, 35, 0.76);
+      --panel-strong: rgba(12, 23, 40, 0.92);
+      --line: rgba(129, 140, 248, 0.22);
+      --line-soft: rgba(148, 163, 184, 0.18);
+      --text: #dbeafe;
+      --muted: #8da2be;
+      --danger: #fb7185;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --info: #38bdf8;
+      --vio: #a78bfa;
+      --shadow: 0 25px 60px rgba(2, 6, 23, 0.55);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 8% -18%, rgba(56, 189, 248, 0.2), transparent 42%),
+        radial-gradient(circle at 95% -15%, rgba(167, 139, 250, 0.24), transparent 39%),
+        linear-gradient(180deg, var(--bg-2), var(--bg-1));
+      min-height: 100vh;
+    }
+    .shell { max-width: 1540px; margin: 0 auto; padding: 20px 16px 48px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .title { font-size: 1.5rem; font-weight: 700; letter-spacing: 0.2px; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .chip {
+      background: rgba(11, 20, 35, 0.55);
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding: 6px 10px;
+    }
+    .chip.live::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 8px;
+      background: #34d399;
+      box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.75);
+      animation: pulse 2s infinite;
+      vertical-align: middle;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.75); }
+      70% { box-shadow: 0 0 0 11px rgba(52, 211, 153, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+    }
+    .btn {
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(17, 24, 39, 0.95));
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      font-weight: 600;
+      padding: 9px 12px;
+      cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.08); }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(250px, 1fr) 190px 140px auto;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .input, .select {
+      width: 100%;
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      background: rgba(11, 20, 35, 0.76);
+      color: var(--text);
+      padding: 10px 12px;
+    }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(130px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .card {
+      border: 1px solid var(--line-soft);
+      background: linear-gradient(160deg, var(--panel), var(--panel-strong));
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 12px;
+      backdrop-filter: blur(3px);
+    }
+    .k-label { color: var(--muted); font-size: 0.78rem; margin-bottom: 4px; }
+    .k-value { font-size: 1.52rem; font-weight: 700; }
+
+    .grid-main { display: grid; grid-template-columns: 2fr 1.2fr; gap: 10px; margin-bottom: 10px; }
+    .grid-mid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .panel-title { font-size: 0.93rem; font-weight: 650; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .chart { width: 100%; height: 320px; }
+    .chart.short { height: 280px; }
+
+    .table-wrap { overflow: auto; max-height: 540px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 8px; text-align: left; vertical-align: middle; }
+    th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: rgba(10, 18, 32, 0.95); }
+    tr:hover td { background: rgba(56, 189, 248, 0.06); }
+
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      white-space: nowrap;
+    }
+    .attack { color: var(--danger); background: rgba(251, 113, 133, 0.12); }
+    .connection { color: var(--ok); background: rgba(52, 211, 153, 0.12); }
+    .info { color: var(--warn); background: rgba(251, 191, 36, 0.12); }
+    .country-cell { display: inline-flex; align-items: center; gap: 8px; }
+    .flag-icon {
+      width: 18px;
+      height: 13px;
+      border-radius: 3px;
+      border: 1px solid rgba(148, 163, 184, 0.38);
+      object-fit: cover;
+      background: rgba(148, 163, 184, 0.2);
+      flex-shrink: 0;
+    }
+    .threat {
+      min-width: 54px;
+      text-align: center;
+      font-weight: 700;
+      color: #081016;
+      border-radius: 999px;
+      padding: 3px 6px;
+      font-size: 0.72rem;
+      display: inline-block;
+    }
+    .ip-btn {
+      background: none;
+      border: none;
+      color: var(--info);
+      cursor: pointer;
+      padding: 0;
+      font: inherit;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    .drawer {
+      position: fixed;
+      right: 0;
+      top: 0;
+      width: min(760px, 96vw);
+      height: 100vh;
+      background: rgba(6, 11, 20, 0.98);
+      border-left: 1px solid var(--line);
+      box-shadow: -30px 0 70px rgba(0, 0, 0, 0.58);
+      transform: translateX(100%);
+      transition: transform 0.28s ease;
+      z-index: 20;
+      padding: 14px;
+      overflow-y: auto;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .drawer-grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+    .drawer pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.76rem;
+      color: #bdcff1;
+    }
+
+    @media (max-width: 1280px) {
+      .kpis { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+      .grid-main, .grid-mid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>
+        <div class="title">Security Command Center</div>
+        <div class="subtitle">Geo Heatmap, ASN Intelligence, IOC/Threat Match und IP-Drilldown</div>
+      </div>
+      <div class="row">
+        <span class="chip">ENV: PROD</span>
+        <span class="chip live">Live Feed</span>
+        <span class="chip" id="lastUpdate">Update: -</span>
+        <button id="refreshBtn" class="btn">Refresh</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <input id="search" class="input" placeholder="Suche IP, Pfad, User-Agent, Action..." />
+      <select id="category" class="select">
+        <option value="all">Alle Kategorien</option>
+        <option value="attack">Attack</option>
+        <option value="connection">Connection</option>
+        <option value="info">Info</option>
+      </select>
+      <select id="window" class="select">
+        <option value="1">1h</option>
+        <option value="6">6h</option>
+        <option value="24" selected>24h</option>
+        <option value="168">7d</option>
+      </select>
+      <button id="applyBtn" class="btn">Apply</button>
+    </div>
+
+    <div class="kpis">
+      <div class="card"><div class="k-label">Angriffe</div><div id="kAttacks" class="k-value" style="color:var(--danger)">0</div></div>
+      <div class="card"><div class="k-label">Verbindungen</div><div id="kConnections" class="k-value" style="color:var(--ok)">0</div></div>
+      <div class="card"><div class="k-label">Bans</div><div id="kBans" class="k-value" style="color:var(--warn)">0</div></div>
+      <div class="card"><div class="k-label">Aktive Quellen</div><div id="kSources" class="k-value" style="color:var(--info)">0</div></div>
+      <div class="card"><div class="k-label">Web Requests</div><div id="kWeb" class="k-value" style="color:var(--vio)">0</div></div>
+      <div class="card"><div class="k-label">Top Threat</div><div id="kThreat" class="k-value" style="color:#fb7185">0</div></div>
+      <div class="card"><div class="k-label">Top ASN</div><div id="kAsn" class="k-value" style="color:#93c5fd">-</div></div>
+    </div>
+
+    <div class="grid-main">
+      <div class="card">
+        <div class="panel-title"><span>Traffic Timeline</span><span class="subtitle">Attack vs Connection vs Web</span></div>
+        <div id="timelineChart" class="chart"></div>
+      </div>
+      <div class="card">
+        <div class="panel-title"><span>Global Source Map</span><span class="subtitle">Events je Land</span></div>
+        <div id="geoChart" class="chart"></div>
+      </div>
+    </div>
+
+    <div class="grid-mid">
+      <div class="card">
+        <div class="panel-title"><span>Top ASN (Traffic + Attack)</span><span class="subtitle">Provider-Konzentration</span></div>
+        <div id="asnChart" class="chart short"></div>
+      </div>
+      <div class="card">
+        <div class="panel-title"><span>Top Source IPs (Threat Overlay)</span><span class="subtitle">Klick auf IP für Drilldown</span></div>
+        <div id="ipChart" class="chart short"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="panel-title"><span>Live Event Feed</span><span class="subtitle">inkl. Threat Score, ASN, IOC Labels</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Zeit (UTC)</th>
+              <th>Cat</th>
+              <th>Country</th>
+              <th>IP</th>
+              <th>ASN</th>
+              <th>Threat</th>
+              <th>Action</th>
+              <th>Path</th>
+              <th>User Agent</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="title" style="font-size:1.1rem" id="dIp">IP Drilldown</div>
+        <div class="subtitle" id="dMeta">-</div>
+      </div>
+      <button class="btn" id="closeDrawer">Close</button>
+    </div>
+
+    <div class="kpis" style="grid-template-columns: repeat(4, minmax(110px, 1fr));">
+      <div class="card"><div class="k-label">Events</div><div id="dTotal" class="k-value" style="font-size:1.2rem">0</div></div>
+      <div class="card"><div class="k-label">Attacks</div><div id="dAttacks" class="k-value" style="font-size:1.2rem;color:var(--danger)">0</div></div>
+      <div class="card"><div class="k-label">Bans</div><div id="dBans" class="k-value" style="font-size:1.2rem;color:var(--warn)">0</div></div>
+      <div class="card"><div class="k-label">Threat</div><div id="dThreat" class="k-value" style="font-size:1.2rem;color:#f87171">0</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:10px;">
+      <div class="panel-title">Timeline</div>
+      <div id="dTimeline" class="chart short"></div>
+    </div>
+
+    <div class="drawer-grid">
+      <div class="card">
+        <div class="panel-title">Actions</div>
+        <div id="dActions" class="chart short"></div>
+      </div>
+      <div class="card">
+        <div class="panel-title">Status Codes</div>
+        <div id="dStatus" class="chart short"></div>
+      </div>
+    </div>
+
+    <div class="drawer-grid" style="margin-top:10px;">
+      <div class="card">
+        <div class="panel-title">Top Paths</div>
+        <pre id="dPaths">-</pre>
+      </div>
+      <div class="card">
+        <div class="panel-title">User Agents</div>
+        <pre id="dUa">-</pre>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:10px;">
+      <div class="panel-title">Threat Labels</div>
+      <pre id="dLabels">-</pre>
+    </div>
+  </aside>
+
+<script>
+const state = { hours: 24, category: 'all', q: '' };
+let timelineChart, geoChart, asnChart, ipChart;
+let dTimelineChart, dActionsChart, dStatusChart;
+
+function esc(v) {
+  return String(v ?? '').replace(/[&<>\"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+}
+
+function ccClean(cc) {
+  const c = String(cc || '').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(c) ? c : '';
+}
+
+function flagIconHtml(cc, title = '') {
+  const c = ccClean(cc);
+  if (!c || c === 'PR') return '<span style="font-size:11px;color:#94a3b8">--</span>';
+  return `<img class="flag-icon" src="https://flagcdn.com/24x18/${c.toLowerCase()}.png" alt="${c}" title="${esc(title || c)}" loading="lazy" onerror="this.style.display='none'" />`;
+}
+
+function threatColor(score) {
+  const s = Number(score || 0);
+  if (s >= 80) return '#fb7185';
+  if (s >= 55) return '#f59e0b';
+  if (s >= 30) return '#facc15';
+  return '#86efac';
+}
+
+function setText(id, v) {
+  document.getElementById(id).textContent = v ?? '-';
+}
+
+function summaryUrl() {
+  const p = new URLSearchParams({
+    hours: String(state.hours),
+    category: state.category,
+    q: state.q,
+    limit: '180'
+  });
+  return '/api/summary?' + p.toString();
+}
+
+function geoUrl() {
+  return '/api/geo?hours=' + encodeURIComponent(String(state.hours));
+}
+
+function commonAxis() {
+  return {
+    axisLine: { lineStyle: { color: 'rgba(148,163,184,0.4)' } },
+    axisLabel: { color: '#9fb3cf' },
+    splitLine: { lineStyle: { color: 'rgba(148,163,184,0.12)' } }
+  };
+}
+
+function collectLngLatPairs(node, out) {
+  if (!Array.isArray(node)) return;
+  if (node.length >= 2 && typeof node[0] === 'number' && typeof node[1] === 'number') {
+    out.push([node[0], node[1]]);
+    return;
+  }
+  for (const x of node) collectLngLatPairs(x, out);
+}
+
+function buildCountryCenterMap() {
+  const mapObj = echarts.getMap && echarts.getMap('world');
+  const features = mapObj?.geoJSON?.features || [];
+  const centers = {};
+  for (const f of features) {
+    const name = f?.properties?.name;
+    if (!name) continue;
+    const pts = [];
+    collectLngLatPairs(f?.geometry?.coordinates, pts);
+    if (!pts.length) continue;
+    let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
+    for (const p of pts) {
+      const lon = Number(p[0]);
+      const lat = Number(p[1]);
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+      minLon = Math.min(minLon, lon);
+      maxLon = Math.max(maxLon, lon);
+      minLat = Math.min(minLat, lat);
+      maxLat = Math.max(maxLat, lat);
+    }
+    if (minLon <= maxLon && minLat <= maxLat) {
+      centers[name] = [(minLon + maxLon) / 2, (minLat + maxLat) / 2];
+    }
+  }
+  return centers;
+}
+
+function renderTimeline(timeline) {
+  const el = document.getElementById('timelineChart');
+  if (!timelineChart) timelineChart = echarts.init(el, null, { renderer: 'canvas' });
+  timelineChart.setOption({
+    animationDuration: 450,
+    grid: { top: 30, left: 38, right: 16, bottom: 32 },
+    tooltip: { trigger: 'axis' },
+    legend: { textStyle: { color: '#bcd1ee' }, top: 0 },
+    xAxis: { ...commonAxis(), type: 'category', data: timeline.map(x => x.slot) },
+    yAxis: { ...commonAxis(), type: 'value' },
+    series: [
+      { name: 'Attack', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#fb7185' }, areaStyle: { color: 'rgba(251,113,133,.12)' }, data: timeline.map(x => x.attacks) },
+      { name: 'Connection', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#34d399' }, areaStyle: { color: 'rgba(52,211,153,.1)' }, data: timeline.map(x => x.connections) },
+      { name: 'Web', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#38bdf8' }, areaStyle: { color: 'rgba(56,189,248,.11)' }, data: timeline.map(x => x.web) }
+    ]
+  }, true);
+}
+
+function renderGeo(countries, flowsConnection = [], flowsAttack = [], target = null) {
+  const mapData = countries
+    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
+    .map(c => ({ name: c.country_name, value: Number(c.count || 0), attacks: Number(c.attacks || 0) }));
+
+  const max = mapData.reduce((m, x) => Math.max(m, x.value), 10);
+
+  const el = document.getElementById('geoChart');
+  if (!geoChart) geoChart = echarts.init(el, null, { renderer: 'canvas' });
+  if (!echarts.getMap || !echarts.getMap('world')) {
+    geoChart.setOption({
+      title: {
+        text: 'World map asset not loaded',
+        left: 'center',
+        top: 'middle',
+        textStyle: { color: '#9fb3cf', fontSize: 13, fontWeight: 500 }
+      }
+    }, true);
+    return;
+  }
+  const targetCoord = target && Number.isFinite(Number(target.lon)) && Number.isFinite(Number(target.lat))
+    ? [Number(target.lon), Number(target.lat)]
+    : [8.6821, 50.1109];
+  const targetName = target?.name || 'Protected Server';
+  const ipFlowConn = (flowsConnection || [])
+    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
+    .slice(0, 28)
+    .map(f => ({
+      fromName: `${f.country_name} (${f.ip})`,
+      toName: targetName,
+      value: Number(f.count || 0),
+      coords: [[Number(f.lon), Number(f.lat)], targetCoord]
+    }));
+  const ipFlowAttack = (flowsAttack || [])
+    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
+    .slice(0, 28)
+    .map(f => ({
+      fromName: `${f.country_name} (${f.ip})`,
+      toName: targetName,
+      value: Number(f.count || 0),
+      coords: [[Number(f.lon), Number(f.lat)], targetCoord]
+    }));
+  const flowSources = (flowsConnection || [])
+    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
+    .slice(0, 28)
+    .map(f => ({
+      name: `${f.country_name} (${f.ip})`,
+      value: [Number(f.lon), Number(f.lat), Number(f.count || 0)],
+      country: f.country_name,
+      ip: f.ip
+    }));
+  const countryCenters = buildCountryCenterMap();
+  const countryFlowConn = (countries || [])
+    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
+    .filter(c => countryCenters[c.country_name])
+    .filter(c => Number(c.count || 0) - Number(c.attacks || 0) > 0)
+    .slice(0, 18)
+    .map(c => ({
+      fromName: `${c.country_name}`,
+      toName: targetName,
+      value: Number(c.count || 0) - Number(c.attacks || 0),
+      coords: [countryCenters[c.country_name], targetCoord]
+    }));
+  const countryFlowAttack = (countries || [])
+    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
+    .filter(c => countryCenters[c.country_name])
+    .filter(c => Number(c.attacks || 0) > 0)
+    .slice(0, 18)
+    .map(c => ({
+      fromName: `${c.country_name}`,
+      toName: targetName,
+      value: Number(c.attacks || 0),
+      coords: [countryCenters[c.country_name], targetCoord]
+    }));
+  const flowLinesConn = [...countryFlowConn, ...ipFlowConn];
+  const flowLinesAttack = [...countryFlowAttack, ...ipFlowAttack];
+  geoChart.setOption({
+    geo: {
+      map: 'world',
+      roam: true,
+      zoom: 1.15,
+      itemStyle: {
+        borderColor: 'rgba(148,163,184,0.25)',
+        borderWidth: 0.7,
+        areaColor: '#1f2937'
+      },
+      emphasis: { itemStyle: { areaColor: '#7c3aed' }, label: { color: '#fff' } }
+    },
+    tooltip: {
+      trigger: 'item',
+      formatter: (p) => {
+        const d = p.data || {};
+        if (Array.isArray(d.coords)) {
+          return `${esc(d.fromName)} -> ${esc(d.toName)}<br>Connections: ${Number(d.value || 0)}`;
+        }
+        if (Array.isArray(d.value) && d.ip) {
+          return `${esc(d.country)}<br>IP: ${esc(d.ip)}<br>Connections: ${Number(d.value[2] || 0)}`;
+        }
+        return `${esc(p.name || 'Unknown')}<br>Events: ${Number(d.value || 0)}<br>Attacks: ${Number(d.attacks || 0)}`;
+      }
+    },
+    visualMap: {
+      min: 0,
+      max,
+      orient: 'horizontal',
+      left: 8,
+      bottom: 4,
+      text: ['High', 'Low'],
+      textStyle: { color: '#bcd1ee' },
+      inRange: { color: ['#1e3a8a', '#0284c7', '#22d3ee', '#f59e0b', '#fb7185'] }
+    },
+    series: [{
+      name: 'Geo Events',
+      type: 'map',
+      map: 'world',
+      geoIndex: 0,
+      data: mapData
+    },
+    {
+      name: 'Connection Flow',
+      type: 'lines',
+      coordinateSystem: 'geo',
+      zlevel: 2,
+      large: false,
+      effect: {
+        show: true,
+        period: 4,
+        trailLength: 0.25,
+        symbol: 'arrow',
+        symbolSize: 8,
+        color: '#22d3ee'
+      },
+      lineStyle: {
+        color: 'rgba(34, 211, 238, 0.75)',
+        width: 1.8,
+        opacity: 0.85,
+        curveness: 0.32
+      },
+      data: flowLinesConn
+    },
+    {
+      name: 'Attack Flow',
+      type: 'lines',
+      coordinateSystem: 'geo',
+      zlevel: 2,
+      large: false,
+      effect: {
+        show: true,
+        period: 4.8,
+        trailLength: 0.2,
+        symbol: 'arrow',
+        symbolSize: 8,
+        color: '#fb7185'
+      },
+      lineStyle: {
+        color: 'rgba(251, 113, 133, 0.72)',
+        width: 1.6,
+        opacity: 0.82,
+        curveness: 0.36
+      },
+      data: flowLinesAttack
+    },
+    {
+      name: 'Flow Sources',
+      type: 'effectScatter',
+      coordinateSystem: 'geo',
+      zlevel: 3,
+      rippleEffect: { scale: 2.4, brushType: 'stroke' },
+      symbolSize: (val) => Math.min(14, 5 + Number(val[2] || 0) * 0.16),
+      itemStyle: { color: '#22d3ee' },
+      data: flowSources
+    },
+    {
+      name: 'Target',
+      type: 'scatter',
+      coordinateSystem: 'geo',
+      zlevel: 4,
+      symbol: 'diamond',
+      symbolSize: 11,
+      itemStyle: { color: '#f97316', shadowBlur: 12, shadowColor: 'rgba(249,115,22,.65)' },
+      label: { show: true, formatter: targetName, color: '#f8fafc', position: 'right', fontSize: 11 },
+      data: [{ name: targetName, value: targetCoord }]
+    }]
+  }, true);
+}
+
+function renderAsn(topAsn) {
+  const data = (topAsn || []).slice(0, 10).reverse();
+  const el = document.getElementById('asnChart');
+  if (!asnChart) asnChart = echarts.init(el, null, { renderer: 'canvas' });
+  asnChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (items) => {
+        const it = items[0] || {};
+        const d = (it.data || {});
+        return `${esc(d.label || '')}<br>Events: ${Number(d.value || 0)}<br>Attacks: ${Number(d.attacks || 0)}<br>IPs: ${Number(d.unique_ips || 0)}`;
+      }
+    },
+    grid: { top: 12, left: 20, right: 20, bottom: 20, containLabel: true },
+    xAxis: { ...commonAxis(), type: 'value' },
+    yAxis: {
+      ...commonAxis(),
+      type: 'category',
+      data: data.map(x => `${x.asn} ${String(x.as_org || '').slice(0, 20)}`)
+    },
+    series: [{
+      type: 'bar',
+      data: data.map(x => ({ value: Number(x.count || 0), label: `${x.asn} ${x.as_org}`, attacks: x.attacks, unique_ips: x.unique_ips })),
+      showBackground: true,
+      backgroundStyle: { color: 'rgba(148,163,184,.08)' },
+      itemStyle: {
+        borderRadius: [0, 6, 6, 0],
+        color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+          { offset: 0, color: '#7dd3fc' },
+          { offset: 1, color: '#818cf8' }
+        ])
+      }
+    }]
+  }, true);
+}
+
+function renderTopIps(topIps) {
+  const data = (topIps || []).slice(0, 10).reverse();
+  const el = document.getElementById('ipChart');
+  if (!ipChart) ipChart = echarts.init(el, null, { renderer: 'canvas' });
+  ipChart.setOption({
+    tooltip: {
+      trigger: 'item',
+      formatter: (p) => {
+        const d = p.data || {};
+        return `${esc(d.ip)}<br>Events: ${d.value}<br>Threat: ${d.threat_score}<br>ASN: ${esc(d.asn || '-')}`;
+      }
+    },
+    grid: { top: 12, left: 20, right: 20, bottom: 20, containLabel: true },
+    xAxis: { ...commonAxis(), type: 'value' },
+    yAxis: { ...commonAxis(), type: 'category', data: data.map(x => x.ip) },
+    series: [{
+      type: 'bar',
+      data: data.map(x => ({
+        value: Number(x.count || 0),
+        ip: x.ip,
+        asn: x.asn,
+        threat_score: Number(x.threat_score || 0),
+        itemStyle: {
+          color: threatColor(Number(x.threat_score || 0)),
+          borderRadius: [0, 6, 6, 0]
+        }
+      }))
+    }]
+  }, true);
+
+  ipChart.off('click');
+  ipChart.on('click', (evt) => {
+    if (evt?.data?.ip) openDrilldown(evt.data.ip);
+  });
+}
+
+function renderRows(recent) {
+  const rows = (recent || []).slice(0, 160);
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = rows.map(ev => {
+    const score = Number(ev.threat_score || 0);
+    const labels = (ev.threat_labels || []).join(', ');
+    const cat = ev.category || 'info';
+    return `
+      <tr>
+        <td class="mono">${esc(ev.ts)}</td>
+        <td><span class="pill ${esc(cat)}">${esc(cat)}</span></td>
+        <td><span class="country-cell">${flagIconHtml(ev.country_code, ev.country_name)}<span>${esc(ev.country_code)} ${esc(ev.country_name || '')}</span></span></td>
+        <td class="mono"><button class="ip-btn" data-ip="${esc(ev.ip)}">${esc(ev.ip)}</button></td>
+        <td title="${esc(ev.as_org || '')}">${esc(ev.asn || 'AS-UNK')}</td>
+        <td title="${esc(labels)}"><span class="threat" style="background:${threatColor(score)}">${score}</span></td>
+        <td>${esc(ev.action)}</td>
+        <td title="${esc(ev.path)}">${esc(String(ev.path || '-').slice(0, 40))}</td>
+        <td title="${esc(ev.user_agent || ev.ua_family)}">${esc(String(ev.ua_family || '-').slice(0, 32))}</td>
+      </tr>
+    `;
+  }).join('');
+
+  tbody.querySelectorAll('.ip-btn').forEach(btn => {
+    btn.addEventListener('click', () => openDrilldown(btn.dataset.ip));
+  });
+}
+
+function applySummary(data) {
+  setText('kAttacks', data.totals?.attacks || 0);
+  setText('kConnections', data.totals?.connections || 0);
+  setText('kBans', data.totals?.bans || 0);
+  setText('kSources', data.totals?.active_sources || 0);
+  setText('kWeb', data.totals?.web_requests || 0);
+
+  const maxThreat = Math.max(0, ...(data.top_ips || []).map(x => Number(x.threat_score || 0)));
+  setText('kThreat', maxThreat);
+
+  const topAsn = (data.top_ips || []).find(x => x.asn && x.asn !== 'AS-UNK');
+  setText('kAsn', topAsn ? topAsn.asn : 'AS-UNK');
+
+  document.getElementById('lastUpdate').textContent = 'Update: ' + new Date(data.generated_at).toLocaleTimeString();
+
+  renderTimeline(data.timeline || []);
+  renderTopIps(data.top_ips || []);
+  renderRows(data.recent || []);
+}
+
+function applyGeo(data) {
+  try {
+    renderGeo(
+      data.countries || [],
+      data.flows_connection || data.flows || [],
+      data.flows_attack || [],
+      data.target || null
+    );
+  } catch (_) {}
+  try {
+    renderAsn(data.top_asn || []);
+  } catch (_) {}
+}
+
+async function fetchSummary() {
+  const res = await fetch(summaryUrl());
+  if (!res.ok) return;
+  const data = await res.json();
+  applySummary(data);
+}
+
+async function fetchGeo() {
+  const res = await fetch(geoUrl());
+  if (!res.ok) return;
+  const data = await res.json();
+  applyGeo(data);
+}
+
+async function refreshAll() {
+  await Promise.all([fetchSummary(), fetchGeo()]);
+}
+
+function listToText(items, formatter) {
+  if (!items || !items.length) return '-';
+  return items.map((x, i) => `${i + 1}. ${formatter(x)}`).join('\n');
+}
+
+function ensureDrawerCharts() {
+  if (!dTimelineChart) dTimelineChart = echarts.init(document.getElementById('dTimeline'), null, { renderer: 'canvas' });
+  if (!dActionsChart) dActionsChart = echarts.init(document.getElementById('dActions'), null, { renderer: 'canvas' });
+  if (!dStatusChart) dStatusChart = echarts.init(document.getElementById('dStatus'), null, { renderer: 'canvas' });
+}
+
+function renderDrilldownCharts(data) {
+  ensureDrawerCharts();
+
+  dTimelineChart.setOption({
+    grid: { top: 16, left: 36, right: 16, bottom: 28 },
+    tooltip: { trigger: 'axis' },
+    xAxis: { ...commonAxis(), type: 'category', data: (data.timeline || []).map(x => x.slot) },
+    yAxis: { ...commonAxis(), type: 'value' },
+    series: [
+      { type: 'line', name: 'Total', smooth: 0.2, symbol: 'none', data: (data.timeline || []).map(x => x.total), lineStyle: { color: '#38bdf8' } },
+      { type: 'line', name: 'Attack', smooth: 0.2, symbol: 'none', data: (data.timeline || []).map(x => x.attacks), lineStyle: { color: '#fb7185' } }
+    ]
+  }, true);
+
+  dActionsChart.setOption({
+    tooltip: { trigger: 'item' },
+    series: [{
+      type: 'pie',
+      radius: ['36%', '70%'],
+      label: { color: '#bcd1ee', formatter: '{b}: {d}%' },
+      data: (data.top_actions || []).map(x => ({ name: x.action, value: Number(x.count || 0) }))
+    }]
+  }, true);
+
+  dStatusChart.setOption({
+    grid: { top: 16, left: 28, right: 16, bottom: 24, containLabel: true },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    xAxis: { ...commonAxis(), type: 'category', data: (data.status_breakdown || []).map(x => String(x.status)) },
+    yAxis: { ...commonAxis(), type: 'value' },
+    series: [{ type: 'bar', data: (data.status_breakdown || []).map(x => Number(x.count || 0)), itemStyle: { color: '#22d3ee', borderRadius: [6,6,0,0] } }]
+  }, true);
+}
+
+async function openDrilldown(ip) {
+  if (!ip || ip === '-') return;
+  const res = await fetch('/api/ip/' + encodeURIComponent(ip) + '?hours=168');
+  if (!res.ok) return;
+  const data = await res.json();
+
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer').setAttribute('aria-hidden', 'false');
+
+  setText('dIp', data.ip || ip);
+  setText('dMeta', `${data.enrichment?.country_name || '-'} | ${data.enrichment?.asn || '-'} ${data.enrichment?.as_org || ''}`);
+  setText('dTotal', data.totals?.total || 0);
+  setText('dAttacks', data.totals?.attacks || 0);
+  setText('dBans', data.totals?.bans || 0);
+  setText('dThreat', data.enrichment?.threat_score || 0);
+
+  document.getElementById('dPaths').textContent = listToText(data.top_paths, x => `${x.path} (${x.count})`);
+  document.getElementById('dUa').textContent = listToText(data.top_ua, x => `${x.ua_family} [${x.ua_device}] (${x.count})`);
+  document.getElementById('dLabels').textContent = (data.enrichment?.threat_labels || []).join(', ') || '-';
+
+  renderDrilldownCharts(data);
+}
+
+function connectStream() {
+  const es = new EventSource('/api/stream');
+  es.onmessage = (evt) => {
+    try {
+      if (state.hours !== 24 || state.category !== 'all' || state.q) return;
+      const data = JSON.parse(evt.data);
+      applySummary(data);
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(connectStream, 4500);
+  };
+}
+
+function resizeCharts() {
+  [timelineChart, geoChart, asnChart, ipChart, dTimelineChart, dActionsChart, dStatusChart].forEach(ch => {
+    if (ch) ch.resize();
+  });
+}
+
+window.addEventListener('resize', resizeCharts);
+document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+document.getElementById('closeDrawer').addEventListener('click', () => {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer').setAttribute('aria-hidden', 'true');
+});
+document.getElementById('applyBtn').addEventListener('click', () => {
+  state.category = document.getElementById('category').value;
+  state.hours = Number(document.getElementById('window').value);
+  state.q = document.getElementById('search').value.trim();
+  refreshAll();
+});
+document.getElementById('search').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('applyBtn').click();
+});
+
+refreshAll();
+connectStream();
+setInterval(() => {
+  if (document.hidden) return;
+  refreshAll();
+}, 20000);
+</script>
+</body>
+</html>
