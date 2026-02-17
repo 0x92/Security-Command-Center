@@ -8,11 +8,9 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.getenv('SC_DATA_DIR', os.path.join(BASE_DIR, 'data'))
-DB_PATH = os.getenv('SC_DB_PATH', os.path.join(DATA_DIR, 'security_events.db'))
-CURSOR_PATH = os.getenv('SC_CURSOR_PATH', os.path.join(DATA_DIR, 'journal.cursor'))
-OFFSETS_PATH = os.getenv('SC_OFFSETS_PATH', os.path.join(DATA_DIR, 'file_offsets.json'))
+DB_PATH = '/opt/security-monitor/data/security_events.db'
+CURSOR_PATH = '/opt/security-monitor/data/journal.cursor'
+OFFSETS_PATH = '/opt/security-monitor/data/file_offsets.json'
 POLL_SECONDS = 5
 RETENTION_DAYS = 30
 MAX_RECENT_BOOTSTRAP = 1000
@@ -21,6 +19,9 @@ WEB_LOGS = [
     '/var/log/nginx/access.log',
     '/var/log/apache2/access.log',
 ]
+FAIL2BAN_LOGS = [
+    '/var/log/fail2ban.log',
+]
 
 RE_UFW = re.compile(r"\[UFW BLOCK\].*SRC=(?P<src>\S+).*DPT=(?P<dpt>\d+)")
 RE_SSH_FAIL = re.compile(r"Failed password for(?: invalid user)? (?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)")
@@ -28,6 +29,9 @@ RE_SSH_FAIL_KEY = re.compile(r"Failed publickey for(?: invalid user)? (?P<user>\
 RE_SSH_ACCEPT = re.compile(r"Accepted (?P<method>\S+) for (?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+)")
 RE_F2B_BAN = re.compile(r"\[sshd\]\s+Ban\s+(?P<ip>[0-9a-fA-F:.]+)")
 RE_F2B_UNBAN = re.compile(r"\[sshd\]\s+Unban\s+(?P<ip>[0-9a-fA-F:.]+)")
+RE_F2B_LOG = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}).*?\[sshd\]\s+(?P<verb>Ban|Unban)\s+(?P<ip>[0-9a-fA-F:.]+)"
+)
 
 # Combined log format for Nginx/Apache
 RE_WEB = re.compile(
@@ -304,6 +308,39 @@ def parse_web_line(line, source):
     }
 
 
+def parse_fail2ban_line(line):
+    m = RE_F2B_LOG.search(line or '')
+    if not m:
+        return None
+
+    verb = (m.group('verb') or '').lower()
+    action = 'ip_banned' if verb == 'ban' else 'ip_unbanned'
+    category = 'attack' if action == 'ip_banned' else 'info'
+
+    ts = datetime.now(timezone.utc).isoformat()
+    try:
+        dt = datetime.strptime(m.group('ts'), '%Y-%m-%d %H:%M:%S,%f')
+        ts = dt.replace(tzinfo=timezone.utc).isoformat()
+    except Exception:
+        pass
+
+    return {
+        'source': 'fail2ban',
+        'category': category,
+        'action': action,
+        'ip': m.group('ip'),
+        'port': None,
+        'raw': line[:1000],
+        'ts': ts,
+        'method': None,
+        'path': None,
+        'status': None,
+        'user_agent': None,
+        'ua_family': None,
+        'ua_device': None,
+    }
+
+
 def process_web_logs(conn, offsets, geo, ua_resolver):
     changed = False
     for path in WEB_LOGS:
@@ -331,6 +368,37 @@ def process_web_logs(conn, offsets, geo, ua_resolver):
                         'country_name': cn,
                         'ua_family': family,
                         'ua_device': device,
+                    })
+                    insert_event(conn, event)
+                    changed = True
+                offsets[path] = f.tell()
+        except Exception:
+            continue
+    return changed
+
+
+def process_fail2ban_logs(conn, offsets, geo):
+    changed = False
+    for path in FAIL2BAN_LOGS:
+        if not os.path.exists(path):
+            continue
+        try:
+            current_size = os.path.getsize(path)
+            offset = int(offsets.get(path, 0))
+            if offset > current_size:
+                offset = 0
+
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                f.seek(offset)
+                for line in f:
+                    line = line.rstrip('\n')
+                    event = parse_fail2ban_line(line)
+                    if not event:
+                        continue
+                    cc, cn = geo.resolve(event.get('ip'))
+                    event.update({
+                        'country_code': cc,
+                        'country_name': cn,
                     })
                     insert_event(conn, event)
                     changed = True
@@ -401,6 +469,9 @@ def main():
 
         web_changed = process_web_logs(conn, offsets, geo, ua_resolver)
         changed = changed or web_changed
+
+        fail2ban_changed = process_fail2ban_logs(conn, offsets, geo)
+        changed = changed or fail2ban_changed
 
         if changed:
             conn.commit()

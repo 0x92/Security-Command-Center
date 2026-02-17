@@ -2,7 +2,9 @@
 import ipaddress
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import threading
 import time
 import urllib.error
@@ -78,6 +80,13 @@ def q(sql, params=()):
     return [dict(r) for r in rows]
 
 
+def exec_write(sql, params=()):
+    conn = get_conn()
+    conn.execute(sql, params)
+    conn.commit()
+    conn.close()
+
+
 def window_start(hours):
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
@@ -102,6 +111,59 @@ def is_private_like(ip_obj):
 
 def to_iso_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_fail2ban_banned_list(output):
+    line = ''
+    for raw in (output or '').splitlines():
+        if 'Banned IP list:' in raw:
+            line = raw.split('Banned IP list:', 1)[1].strip()
+            break
+    if not line:
+        return []
+    return [ip.strip() for ip in line.split() if ip.strip()]
+
+
+def get_live_bans(jail='sshd'):
+    helper = '/usr/local/bin/secmon_fail2ban_helper.py'
+    try:
+        proc = subprocess.run(
+            ['sudo', helper, 'list', jail],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return []
+        payload = (proc.stdout or '').strip()
+        if payload.startswith('['):
+            data = json.loads(payload)
+            return [x for x in data if parse_ip(x)]
+        return parse_fail2ban_banned_list(payload)
+    except Exception:
+        return []
+
+
+def unban_ip_live(ip, jail='sshd'):
+    helper = '/usr/local/bin/secmon_fail2ban_helper.py'
+    ip_obj = parse_ip(ip)
+    if not ip_obj:
+        return False, 'invalid_ip'
+    try:
+        proc = subprocess.run(
+            ['sudo', helper, 'unban', jail, str(ip_obj)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode != 0:
+            msg = (proc.stderr or proc.stdout or 'unban_failed').strip()
+            return False, msg
+        return True, 'ok'
+    except Exception as ex:
+        return False, str(ex)
 
 
 def fetch_json(url, headers=None, timeout=2.5):
@@ -977,6 +1039,109 @@ def ip_detail(ip):
     payload = build_ip_drilldown(ip, hours=hours)
     status = 400 if payload.get('error') else 200
     return jsonify(payload), status
+
+
+@app.route('/api/bans')
+def bans():
+    jail = request.args.get('jail', 'sshd').strip() or 'sshd'
+    live_ips = get_live_bans(jail=jail)
+    live_set = set(live_ips)
+
+    recent_bans = q(
+        """
+        SELECT ip, MAX(ts) AS last_banned_at, COUNT(*) AS bans
+        FROM events
+        WHERE action='ip_banned' AND ip IS NOT NULL
+        GROUP BY ip
+        ORDER BY last_banned_at DESC
+        LIMIT 300
+        """
+    )
+    recent_unbans = q(
+        """
+        SELECT ip, MAX(ts) AS last_unbanned_at
+        FROM events
+        WHERE action='ip_unbanned' AND ip IS NOT NULL
+        GROUP BY ip
+        """
+    )
+    unban_map = {x.get('ip'): x.get('last_unbanned_at') for x in recent_unbans}
+
+    items = []
+    for row in recent_bans:
+        ip = row.get('ip')
+        if not ip:
+            continue
+        items.append({
+            'ip': ip,
+            'is_currently_banned': ip in live_set,
+            'last_banned_at': row.get('last_banned_at'),
+            'last_unbanned_at': unban_map.get(ip),
+            'ban_count': int(row.get('bans') or 0),
+        })
+
+    known = {x['ip'] for x in items}
+    for ip in live_ips:
+        if ip in known:
+            continue
+        items.append({
+            'ip': ip,
+            'is_currently_banned': True,
+            'last_banned_at': None,
+            'last_unbanned_at': None,
+            'ban_count': 0,
+        })
+
+    items = sorted(items, key=lambda x: (0 if x['is_currently_banned'] else 1, x.get('last_banned_at') or ''), reverse=False)
+    return jsonify({
+        'generated_at': to_iso_now(),
+        'jail': jail,
+        'currently_banned': len(live_ips),
+        'items': items[:300],
+    })
+
+
+@app.route('/api/unban', methods=['POST'])
+def unban():
+    payload = request.get_json(silent=True) or {}
+    ip = str(payload.get('ip') or '').strip()
+    jail = str(payload.get('jail') or 'sshd').strip() or 'sshd'
+    ip_obj = parse_ip(ip)
+    if not ip_obj:
+        return jsonify({'ok': False, 'error': 'invalid_ip'}), 400
+
+    ok, msg = unban_ip_live(str(ip_obj), jail=jail)
+    if not ok:
+        return jsonify({'ok': False, 'error': msg}), 500
+
+    exec_write(
+        """
+        INSERT INTO events(
+            ts, source, category, action, ip, port, raw,
+            country_code, country_name, method, path, status,
+            user_agent, ua_family, ua_device
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            to_iso_now(),
+            'dashboard',
+            'info',
+            'ip_unbanned',
+            str(ip_obj),
+            None,
+            f'manual unban via dashboard jail={jail}',
+            '--',
+            'Unknown',
+            None,
+            '/api/unban',
+            None,
+            'dashboard',
+            'dashboard',
+            'control',
+        ),
+    )
+
+    return jsonify({'ok': True, 'ip': str(ip_obj), 'jail': jail})
 
 
 @app.route('/api/stream')

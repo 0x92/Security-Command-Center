@@ -8,6 +8,7 @@ It ingests system and web logs, stores normalized events in SQLite, and serves a
 - Top ASNs and source IPs
 - Live event feed with threat overlays
 - IP drilldown with behavior and enrichment context
+- Ban control panel with live Fail2Ban list and one-click unban
 - Compare mode (current window vs previous window)
 - Timeline zoom/brush, stacked mode, and rate normalization
 - Source-map Top-N filtering, cluster-aware flow rendering, heat/arcs toggle, and replay mode
@@ -66,6 +67,11 @@ python3 collector.py
 - `MAP_TARGET_NAME` (optional)
 - `MAP_TARGET_LAT` (optional)
 - `MAP_TARGET_LON` (optional)
+
+## Fail2Ban Integration (Ban/Unban UI)
+
+The dashboard can show live banned IPs and trigger unban actions.  
+In production this requires a privileged helper and sudoers rule for the dashboard user.
 
 ## GitHub: New Repository + Push
 
