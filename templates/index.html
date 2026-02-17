@@ -79,6 +79,12 @@
       display: grid;
       grid-template-columns: minmax(250px, 1fr) 190px 140px auto;
       gap: 10px;
+      margin-bottom: 10px;
+    }
+    .controls-advanced {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 10px;
       margin-bottom: 12px;
     }
     .input, .select {
@@ -89,6 +95,18 @@
       color: var(--text);
       padding: 10px 12px;
     }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      background: rgba(11, 20, 35, 0.76);
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 0.84rem;
+    }
+    .toggle input { accent-color: #22d3ee; }
 
     .kpis {
       display: grid;
@@ -193,6 +211,7 @@
       .kpis { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
       .grid-main, .grid-mid { grid-template-columns: 1fr; }
       .controls { grid-template-columns: 1fr; }
+      .controls-advanced { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
@@ -206,6 +225,7 @@
       <div class="row">
         <span class="chip">ENV: PROD</span>
         <span class="chip live">Live Feed</span>
+        <span class="chip" id="activeFilter">Scope: Global</span>
         <span class="chip" id="lastUpdate">Update: -</span>
         <button id="refreshBtn" class="btn">Refresh</button>
       </div>
@@ -226,6 +246,25 @@
         <option value="168">7d</option>
       </select>
       <button id="applyBtn" class="btn">Apply</button>
+    </div>
+    <div class="controls-advanced">
+      <label class="toggle"><input type="checkbox" id="compareToggle" /> Compare Prev</label>
+      <label class="toggle"><input type="checkbox" id="normalizeToggle" /> Normalize Rate</label>
+      <select id="timelineMode" class="select">
+        <option value="line">Timeline: Line</option>
+        <option value="stacked">Timeline: Stacked</option>
+      </select>
+      <select id="mapMode" class="select">
+        <option value="both">Map: Arcs + Heat</option>
+        <option value="arcs">Map: Arcs</option>
+        <option value="heat">Map: Heat</option>
+      </select>
+      <select id="mapTopN" class="select">
+        <option value="10">Map Top 10</option>
+        <option value="25">Map Top 25</option>
+        <option value="50" selected>Map Top 50</option>
+      </select>
+      <label class="toggle"><input type="checkbox" id="replayToggle" /> Replay Map</label>
     </div>
 
     <div class="kpis">
@@ -333,7 +372,35 @@
   </aside>
 
 <script>
-const state = { hours: 24, category: 'all', q: '' };
+const severity = {
+  low: '#86efac',
+  medium: '#facc15',
+  high: '#f59e0b',
+  critical: '#fb7185'
+};
+
+const state = {
+  hours: 24,
+  category: 'all',
+  q: '',
+  compare: false,
+  normalize: false,
+  timelineMode: 'line',
+  mapMode: 'both',
+  mapTopN: 50,
+  replay: false,
+  replayBucket: 30,
+  country: '',
+  ip: ''
+};
+
+const cache = {
+  summary: null,
+  geo: null,
+  replayTimer: null,
+  replayIndex: 0
+};
+
 let timelineChart, geoChart, asnChart, ipChart;
 let dTimelineChart, dActionsChart, dStatusChart;
 
@@ -354,14 +421,22 @@ function flagIconHtml(cc, title = '') {
 
 function threatColor(score) {
   const s = Number(score || 0);
-  if (s >= 80) return '#fb7185';
-  if (s >= 55) return '#f59e0b';
-  if (s >= 30) return '#facc15';
-  return '#86efac';
+  if (s >= 80) return severity.critical;
+  if (s >= 55) return severity.high;
+  if (s >= 30) return severity.medium;
+  return severity.low;
 }
 
 function setText(id, v) {
-  document.getElementById(id).textContent = v ?? '-';
+  const el = document.getElementById(id);
+  if (el) el.textContent = v ?? '-';
+}
+
+function updateScopeChip() {
+  const parts = [];
+  if (state.country) parts.push(`Country: ${state.country}`);
+  if (state.ip) parts.push(`IP: ${state.ip}`);
+  document.getElementById('activeFilter').textContent = parts.length ? `Scope: ${parts.join(' | ')}` : 'Scope: Global';
 }
 
 function summaryUrl() {
@@ -369,13 +444,25 @@ function summaryUrl() {
     hours: String(state.hours),
     category: state.category,
     q: state.q,
-    limit: '180'
+    limit: '180',
+    compare: state.compare ? '1' : '0',
+    country: state.country,
+    ip: state.ip
   });
   return '/api/summary?' + p.toString();
 }
 
 function geoUrl() {
-  return '/api/geo?hours=' + encodeURIComponent(String(state.hours));
+  const p = new URLSearchParams({
+    hours: String(state.hours),
+    category: state.category,
+    q: state.q,
+    topn: String(state.mapTopN),
+    replay_bucket: String(state.replayBucket),
+    country: state.country,
+    ip: state.ip
+  });
+  return '/api/geo?' + p.toString();
 }
 
 function commonAxis() {
@@ -422,30 +509,195 @@ function buildCountryCenterMap() {
   return centers;
 }
 
-function renderTimeline(timeline) {
+function normalizeTimelineRows(rows, bucketMinutes) {
+  if (!state.normalize) return rows;
+  const div = Math.max(1, Number(bucketMinutes || 1));
+  return (rows || []).map(x => ({
+    ...x,
+    attacks: Number(x.attacks || 0) / div,
+    connections: Number(x.connections || 0) / div,
+    web: Number(x.web || 0) / div
+  }));
+}
+
+function seriesFromTimeline(rows, key, fallback = 0) {
+  return (rows || []).map(x => Number(x[key] || fallback));
+}
+
+function alignCompareTimeline(curr, prev, key) {
+  const prevVals = seriesFromTimeline(prev, key, 0);
+  const targetLen = (curr || []).length;
+  if (prevVals.length === targetLen) return prevVals;
+  if (!targetLen) return [];
+  const out = new Array(targetLen).fill(0);
+  for (let i = 0; i < targetLen; i++) {
+    const src = Math.floor((i / Math.max(1, targetLen - 1)) * Math.max(0, prevVals.length - 1));
+    out[i] = Number(prevVals[src] || 0);
+  }
+  return out;
+}
+
+function renderTimeline(payload) {
+  const timeline = normalizeTimelineRows(payload.timeline || [], payload.window?.bucket_minutes);
+  const compareTimeline = normalizeTimelineRows(payload.compare?.timeline || [], payload.window?.bucket_minutes);
+  const xSlots = timeline.map(x => x.slot);
+  const yName = state.normalize ? 'Events / min' : 'Events';
+
   const el = document.getElementById('timelineChart');
   if (!timelineChart) timelineChart = echarts.init(el, null, { renderer: 'canvas' });
+
+  const area = state.timelineMode === 'stacked' ? { color: 'rgba(56,189,248,0.08)' } : null;
+  const maybeStack = state.timelineMode === 'stacked' ? 'traffic' : null;
+
+  const series = [
+    {
+      name: 'Attack', type: 'line', smooth: 0.25, symbol: 'none',
+      stack: maybeStack,
+      lineStyle: { width: 2, color: severity.critical },
+      areaStyle: area,
+      data: seriesFromTimeline(timeline, 'attacks')
+    },
+    {
+      name: 'Connection', type: 'line', smooth: 0.25, symbol: 'none',
+      stack: maybeStack,
+      lineStyle: { width: 2, color: '#34d399' },
+      areaStyle: area,
+      data: seriesFromTimeline(timeline, 'connections')
+    },
+    {
+      name: 'Web', type: 'line', smooth: 0.25, symbol: 'none',
+      stack: maybeStack,
+      lineStyle: { width: 2, color: '#38bdf8' },
+      areaStyle: area,
+      data: seriesFromTimeline(timeline, 'web')
+    }
+  ];
+
+  if (state.compare && payload.compare) {
+    series.push(
+      {
+        name: 'Prev Attack', type: 'line', smooth: 0.18, symbol: 'none',
+        lineStyle: { width: 1.4, type: 'dashed', color: 'rgba(251,113,133,0.7)' },
+        data: alignCompareTimeline(timeline, compareTimeline, 'attacks')
+      },
+      {
+        name: 'Prev Connection', type: 'line', smooth: 0.18, symbol: 'none',
+        lineStyle: { width: 1.4, type: 'dashed', color: 'rgba(52,211,153,0.75)' },
+        data: alignCompareTimeline(timeline, compareTimeline, 'connections')
+      }
+    );
+  }
+
   timelineChart.setOption({
-    animationDuration: 450,
-    grid: { top: 30, left: 38, right: 16, bottom: 32 },
+    animationDuration: 380,
+    grid: { top: 36, left: 42, right: 16, bottom: 54 },
     tooltip: { trigger: 'axis' },
     legend: { textStyle: { color: '#bcd1ee' }, top: 0 },
-    xAxis: { ...commonAxis(), type: 'category', data: timeline.map(x => x.slot) },
-    yAxis: { ...commonAxis(), type: 'value' },
-    series: [
-      { name: 'Attack', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#fb7185' }, areaStyle: { color: 'rgba(251,113,133,.12)' }, data: timeline.map(x => x.attacks) },
-      { name: 'Connection', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#34d399' }, areaStyle: { color: 'rgba(52,211,153,.1)' }, data: timeline.map(x => x.connections) },
-      { name: 'Web', type: 'line', smooth: 0.25, symbol: 'none', lineStyle: { width: 2, color: '#38bdf8' }, areaStyle: { color: 'rgba(56,189,248,.11)' }, data: timeline.map(x => x.web) }
-    ]
+    xAxis: { ...commonAxis(), type: 'category', data: xSlots },
+    yAxis: { ...commonAxis(), type: 'value', name: yName, nameTextStyle: { color: '#9fb3cf' } },
+    dataZoom: [
+      { type: 'inside', filterMode: 'none' },
+      { type: 'slider', filterMode: 'none', height: 20, bottom: 24, borderColor: 'rgba(148,163,184,0.2)', textStyle: { color: '#9fb3cf' } }
+    ],
+    brush: { toolbox: ['lineX', 'clear'], xAxisIndex: 0, brushMode: 'single' },
+    series
   }, true);
 }
 
-function renderGeo(countries, flowsConnection = [], flowsAttack = [], target = null) {
-  const mapData = countries
-    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
-    .map(c => ({ name: c.country_name, value: Number(c.count || 0), attacks: Number(c.attacks || 0) }));
+function clusterFlows(flows, step = 6) {
+  const map = new Map();
+  for (const x of (flows || [])) {
+    const lat = Number(x.lat);
+    const lon = Number(x.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const key = `${Math.round(lat / step) * step}:${Math.round(lon / step) * step}:${x.country_name || 'Unknown'}`;
+    const cur = map.get(key) || { ...x, count: 0, lat: 0, lon: 0, size: 0 };
+    cur.count += Number(x.count || 0);
+    cur.lat += lat * Number(x.count || 0);
+    cur.lon += lon * Number(x.count || 0);
+    cur.size += Number(x.count || 0);
+    map.set(key, cur);
+  }
+  const out = [];
+  for (const v of map.values()) {
+    const denom = Math.max(1, v.size);
+    out.push({ ...v, lat: v.lat / denom, lon: v.lon / denom, count: v.count });
+  }
+  return out.sort((a, b) => Number(b.count || 0) - Number(a.count || 0));
+}
 
-  const max = mapData.reduce((m, x) => Math.max(m, x.value), 10);
+function applyCountryFilter(countryName, countryCode = '') {
+  state.country = countryCode || countryName || '';
+  state.ip = '';
+  updateScopeChip();
+  refreshAll();
+}
+
+function applyIpFilter(ip) {
+  state.ip = ip || '';
+  updateScopeChip();
+  refreshAll();
+}
+
+function clearScopeFilters() {
+  state.country = '';
+  state.ip = '';
+  updateScopeChip();
+  refreshAll();
+}
+
+function mapSeriesPayload(countries, flowsConnection, flowsAttack, target) {
+  const targetCoord = target && Number.isFinite(Number(target.lon)) && Number.isFinite(Number(target.lat))
+    ? [Number(target.lon), Number(target.lat)]
+    : [8.6821, 50.1109];
+  const targetName = target?.name || 'Protected Server';
+
+  const mapData = (countries || [])
+    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
+    .map(c => ({
+      name: c.country_name,
+      country_code: c.country_code,
+      value: Number(c.count || 0),
+      attacks: Number(c.attacks || 0)
+    }));
+
+  const flowConn = clusterFlows(flowsConnection || [], 7).slice(0, state.mapTopN);
+  const flowAtk = clusterFlows(flowsAttack || [], 7).slice(0, state.mapTopN);
+
+  const lineConn = flowConn.map(f => ({
+    fromName: `${f.country_name} (${f.ip})`,
+    toName: targetName,
+    value: Number(f.count || 0),
+    coords: [[Number(f.lon), Number(f.lat)], targetCoord],
+    ip: f.ip,
+    country: f.country_name,
+    country_code: f.country_code
+  }));
+
+  const lineAtk = flowAtk.map(f => ({
+    fromName: `${f.country_name} (${f.ip})`,
+    toName: targetName,
+    value: Number(f.count || 0),
+    coords: [[Number(f.lon), Number(f.lat)], targetCoord],
+    ip: f.ip,
+    country: f.country_name,
+    country_code: f.country_code
+  }));
+
+  const src = flowConn.map(f => ({
+    name: `${f.country_name} (${f.ip})`,
+    value: [Number(f.lon), Number(f.lat), Number(f.count || 0)],
+    ip: f.ip,
+    country: f.country_name,
+    country_code: f.country_code
+  }));
+
+  return { mapData, lineConn, lineAtk, src, targetCoord, targetName };
+}
+
+function renderGeo(countries, flowsConnection = [], flowsAttack = [], target = null) {
+  const payload = mapSeriesPayload(countries, flowsConnection, flowsAttack, target);
+  const max = payload.mapData.reduce((m, x) => Math.max(m, x.value), 10);
 
   const el = document.getElementById('geoChart');
   if (!geoChart) geoChart = echarts.init(el, null, { renderer: 'canvas' });
@@ -460,85 +712,63 @@ function renderGeo(countries, flowsConnection = [], flowsAttack = [], target = n
     }, true);
     return;
   }
-  const targetCoord = target && Number.isFinite(Number(target.lon)) && Number.isFinite(Number(target.lat))
-    ? [Number(target.lon), Number(target.lat)]
-    : [8.6821, 50.1109];
-  const targetName = target?.name || 'Protected Server';
-  const ipFlowConn = (flowsConnection || [])
-    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
-    .slice(0, 28)
-    .map(f => ({
-      fromName: `${f.country_name} (${f.ip})`,
-      toName: targetName,
-      value: Number(f.count || 0),
-      coords: [[Number(f.lon), Number(f.lat)], targetCoord]
-    }));
-  const ipFlowAttack = (flowsAttack || [])
-    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
-    .slice(0, 28)
-    .map(f => ({
-      fromName: `${f.country_name} (${f.ip})`,
-      toName: targetName,
-      value: Number(f.count || 0),
-      coords: [[Number(f.lon), Number(f.lat)], targetCoord]
-    }));
-  const flowSources = (flowsConnection || [])
-    .filter(f => Number.isFinite(Number(f.lon)) && Number.isFinite(Number(f.lat)))
-    .slice(0, 28)
-    .map(f => ({
-      name: `${f.country_name} (${f.ip})`,
-      value: [Number(f.lon), Number(f.lat), Number(f.count || 0)],
-      country: f.country_name,
-      ip: f.ip
-    }));
-  const countryCenters = buildCountryCenterMap();
-  const countryFlowConn = (countries || [])
-    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
-    .filter(c => countryCenters[c.country_name])
-    .filter(c => Number(c.count || 0) - Number(c.attacks || 0) > 0)
-    .slice(0, 18)
-    .map(c => ({
-      fromName: `${c.country_name}`,
-      toName: targetName,
-      value: Number(c.count || 0) - Number(c.attacks || 0),
-      coords: [countryCenters[c.country_name], targetCoord]
-    }));
-  const countryFlowAttack = (countries || [])
-    .filter(c => c.country_name && c.country_name !== 'Unknown' && c.country_name !== 'Private Network')
-    .filter(c => countryCenters[c.country_name])
-    .filter(c => Number(c.attacks || 0) > 0)
-    .slice(0, 18)
-    .map(c => ({
-      fromName: `${c.country_name}`,
-      toName: targetName,
-      value: Number(c.attacks || 0),
-      coords: [countryCenters[c.country_name], targetCoord]
-    }));
-  const flowLinesConn = [...countryFlowConn, ...ipFlowConn];
-  const flowLinesAttack = [...countryFlowAttack, ...ipFlowAttack];
+
+  const showArcs = state.mapMode === 'both' || state.mapMode === 'arcs';
+  const showHeat = state.mapMode === 'both' || state.mapMode === 'heat';
+
+  const series = [];
+  if (showHeat) {
+    series.push({ name: 'Geo Events', type: 'map', map: 'world', geoIndex: 0, data: payload.mapData });
+    series.push({
+      name: 'Heat', type: 'heatmap', coordinateSystem: 'geo',
+      data: payload.src.map(s => ({ value: [s.value[0], s.value[1], s.value[2]], ip: s.ip, country: s.country, country_code: s.country_code })),
+      pointSize: 8,
+      blurSize: 14
+    });
+  }
+
+  if (showArcs) {
+    series.push({
+      name: 'Connection Flow', type: 'lines', coordinateSystem: 'geo', zlevel: 2,
+      effect: { show: true, period: 4, trailLength: 0.25, symbol: 'arrow', symbolSize: 8, color: '#22d3ee' },
+      lineStyle: { color: 'rgba(34, 211, 238, 0.75)', width: 1.8, opacity: 0.85, curveness: 0.32 },
+      data: payload.lineConn
+    });
+    series.push({
+      name: 'Attack Flow', type: 'lines', coordinateSystem: 'geo', zlevel: 2,
+      effect: { show: true, period: 4.8, trailLength: 0.2, symbol: 'arrow', symbolSize: 8, color: severity.critical },
+      lineStyle: { color: 'rgba(251, 113, 133, 0.72)', width: 1.6, opacity: 0.82, curveness: 0.36 },
+      data: payload.lineAtk
+    });
+    series.push({
+      name: 'Flow Sources', type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3,
+      rippleEffect: { scale: 2.4, brushType: 'stroke' },
+      symbolSize: (val) => Math.min(14, 5 + Number(val[2] || 0) * 0.2),
+      itemStyle: { color: '#22d3ee' },
+      data: payload.src
+    });
+  }
+
+  series.push({
+    name: 'Target', type: 'scatter', coordinateSystem: 'geo', zlevel: 4, symbol: 'diamond', symbolSize: 11,
+    itemStyle: { color: '#f97316', shadowBlur: 12, shadowColor: 'rgba(249,115,22,.65)' },
+    label: { show: true, formatter: payload.targetName, color: '#f8fafc', position: 'right', fontSize: 11 },
+    data: [{ name: payload.targetName, value: payload.targetCoord }]
+  });
+
   geoChart.setOption({
     geo: {
-      map: 'world',
-      roam: true,
-      zoom: 1.15,
-      itemStyle: {
-        borderColor: 'rgba(148,163,184,0.25)',
-        borderWidth: 0.7,
-        areaColor: '#1f2937'
-      },
-      emphasis: { itemStyle: { areaColor: '#7c3aed' }, label: { color: '#fff' } }
+      map: 'world', roam: true, zoom: 1.15,
+      itemStyle: { borderColor: 'rgba(148,163,184,0.25)', borderWidth: 0.7, areaColor: '#1f2937' },
+      emphasis: { itemStyle: { areaColor: '#1d4ed8' }, label: { color: '#fff' } }
     },
     tooltip: {
       trigger: 'item',
       formatter: (p) => {
         const d = p.data || {};
-        if (Array.isArray(d.coords)) {
-          return `${esc(d.fromName)} -> ${esc(d.toName)}<br>Connections: ${Number(d.value || 0)}`;
-        }
-        if (Array.isArray(d.value) && d.ip) {
-          return `${esc(d.country)}<br>IP: ${esc(d.ip)}<br>Connections: ${Number(d.value[2] || 0)}`;
-        }
-        return `${esc(p.name || 'Unknown')}<br>Events: ${Number(d.value || 0)}<br>Attacks: ${Number(d.attacks || 0)}`;
+        if (Array.isArray(d.coords)) return `${esc(d.fromName)} -> ${esc(d.toName)}<br>Events: ${Number(d.value || 0)}`;
+        if (Array.isArray(d.value) && d.ip) return `${esc(d.country)}<br>IP: ${esc(d.ip)}<br>Events: ${Number(d.value[2] || 0)}`;
+        return `${esc(p.name || d.country || 'Unknown')}<br>Events: ${Number(d.value || 0)}<br>Attacks: ${Number(d.attacks || 0)}`;
       }
     },
     visualMap: {
@@ -549,81 +779,46 @@ function renderGeo(countries, flowsConnection = [], flowsAttack = [], target = n
       bottom: 4,
       text: ['High', 'Low'],
       textStyle: { color: '#bcd1ee' },
-      inRange: { color: ['#1e3a8a', '#0284c7', '#22d3ee', '#f59e0b', '#fb7185'] }
+      inRange: { color: ['#1e3a8a', '#0284c7', '#22d3ee', '#f59e0b', severity.critical] }
     },
-    series: [{
-      name: 'Geo Events',
-      type: 'map',
-      map: 'world',
-      geoIndex: 0,
-      data: mapData
-    },
-    {
-      name: 'Connection Flow',
-      type: 'lines',
-      coordinateSystem: 'geo',
-      zlevel: 2,
-      large: false,
-      effect: {
-        show: true,
-        period: 4,
-        trailLength: 0.25,
-        symbol: 'arrow',
-        symbolSize: 8,
-        color: '#22d3ee'
-      },
-      lineStyle: {
-        color: 'rgba(34, 211, 238, 0.75)',
-        width: 1.8,
-        opacity: 0.85,
-        curveness: 0.32
-      },
-      data: flowLinesConn
-    },
-    {
-      name: 'Attack Flow',
-      type: 'lines',
-      coordinateSystem: 'geo',
-      zlevel: 2,
-      large: false,
-      effect: {
-        show: true,
-        period: 4.8,
-        trailLength: 0.2,
-        symbol: 'arrow',
-        symbolSize: 8,
-        color: '#fb7185'
-      },
-      lineStyle: {
-        color: 'rgba(251, 113, 133, 0.72)',
-        width: 1.6,
-        opacity: 0.82,
-        curveness: 0.36
-      },
-      data: flowLinesAttack
-    },
-    {
-      name: 'Flow Sources',
-      type: 'effectScatter',
-      coordinateSystem: 'geo',
-      zlevel: 3,
-      rippleEffect: { scale: 2.4, brushType: 'stroke' },
-      symbolSize: (val) => Math.min(14, 5 + Number(val[2] || 0) * 0.16),
-      itemStyle: { color: '#22d3ee' },
-      data: flowSources
-    },
-    {
-      name: 'Target',
-      type: 'scatter',
-      coordinateSystem: 'geo',
-      zlevel: 4,
-      symbol: 'diamond',
-      symbolSize: 11,
-      itemStyle: { color: '#f97316', shadowBlur: 12, shadowColor: 'rgba(249,115,22,.65)' },
-      label: { show: true, formatter: targetName, color: '#f8fafc', position: 'right', fontSize: 11 },
-      data: [{ name: targetName, value: targetCoord }]
-    }]
+    series
   }, true);
+
+  geoChart.off('click');
+  geoChart.on('click', (evt) => {
+    const d = evt?.data || {};
+    if (d.ip) {
+      applyIpFilter(d.ip);
+      return;
+    }
+    if (d.country_code || evt?.name) {
+      applyCountryFilter(evt.name, d.country_code || '');
+    }
+  });
+}
+
+function startReplay() {
+  stopReplay();
+  if (!state.replay || !cache.geo?.country_timeline?.length) return;
+  const slots = [...new Set(cache.geo.country_timeline.map(x => x.slot))];
+  if (slots.length < 2) return;
+
+  cache.replayIndex = 0;
+  cache.replayTimer = setInterval(() => {
+    cache.replayIndex = (cache.replayIndex + 1) % slots.length;
+    const slot = slots[cache.replayIndex];
+    const bySlot = (cache.geo.country_timeline || []).filter(x => x.slot === slot);
+    const countries = bySlot.map(x => ({ country_code: x.country_code, country_name: x.country_name, count: x.count, attacks: x.attacks }));
+    renderGeo(countries, cache.geo.flows_connection || [], cache.geo.flows_attack || [], cache.geo.target || null);
+    document.getElementById('lastUpdate').textContent = `Replay: ${slot}`;
+  }, 1400);
+}
+
+function stopReplay() {
+  if (cache.replayTimer) {
+    clearInterval(cache.replayTimer);
+    cache.replayTimer = null;
+  }
 }
 
 function renderAsn(topAsn) {
@@ -642,11 +837,7 @@ function renderAsn(topAsn) {
     },
     grid: { top: 12, left: 20, right: 20, bottom: 20, containLabel: true },
     xAxis: { ...commonAxis(), type: 'value' },
-    yAxis: {
-      ...commonAxis(),
-      type: 'category',
-      data: data.map(x => `${x.asn} ${String(x.as_org || '').slice(0, 20)}`)
-    },
+    yAxis: { ...commonAxis(), type: 'category', data: data.map(x => `${x.asn} ${String(x.as_org || '').slice(0, 20)}`) },
     series: [{
       type: 'bar',
       data: data.map(x => ({ value: Number(x.count || 0), label: `${x.asn} ${x.as_org}`, attacks: x.attacks, unique_ips: x.unique_ips })),
@@ -654,10 +845,7 @@ function renderAsn(topAsn) {
       backgroundStyle: { color: 'rgba(148,163,184,.08)' },
       itemStyle: {
         borderRadius: [0, 6, 6, 0],
-        color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
-          { offset: 0, color: '#7dd3fc' },
-          { offset: 1, color: '#818cf8' }
-        ])
+        color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [{ offset: 0, color: '#7dd3fc' }, { offset: 1, color: '#818cf8' }])
       }
     }]
   }, true);
@@ -685,17 +873,16 @@ function renderTopIps(topIps) {
         ip: x.ip,
         asn: x.asn,
         threat_score: Number(x.threat_score || 0),
-        itemStyle: {
-          color: threatColor(Number(x.threat_score || 0)),
-          borderRadius: [0, 6, 6, 0]
-        }
+        itemStyle: { color: threatColor(Number(x.threat_score || 0)), borderRadius: [0, 6, 6, 0] }
       }))
     }]
   }, true);
 
   ipChart.off('click');
   ipChart.on('click', (evt) => {
-    if (evt?.data?.ip) openDrilldown(evt.data.ip);
+    if (!evt?.data?.ip) return;
+    if (evt?.event?.event?.shiftKey) applyIpFilter(evt.data.ip);
+    else openDrilldown(evt.data.ip);
   });
 }
 
@@ -710,7 +897,7 @@ function renderRows(recent) {
       <tr>
         <td class="mono">${esc(ev.ts)}</td>
         <td><span class="pill ${esc(cat)}">${esc(cat)}</span></td>
-        <td><span class="country-cell">${flagIconHtml(ev.country_code, ev.country_name)}<span>${esc(ev.country_code)} ${esc(ev.country_name || '')}</span></span></td>
+        <td><button class="ip-btn" data-country="${esc(ev.country_code)}" data-country-name="${esc(ev.country_name || '')}"><span class="country-cell">${flagIconHtml(ev.country_code, ev.country_name)}<span>${esc(ev.country_code)} ${esc(ev.country_name || '')}</span></span></button></td>
         <td class="mono"><button class="ip-btn" data-ip="${esc(ev.ip)}">${esc(ev.ip)}</button></td>
         <td title="${esc(ev.as_org || '')}">${esc(ev.asn || 'AS-UNK')}</td>
         <td title="${esc(labels)}"><span class="threat" style="background:${threatColor(score)}">${score}</span></td>
@@ -721,17 +908,42 @@ function renderRows(recent) {
     `;
   }).join('');
 
-  tbody.querySelectorAll('.ip-btn').forEach(btn => {
-    btn.addEventListener('click', () => openDrilldown(btn.dataset.ip));
+  tbody.querySelectorAll('.ip-btn[data-ip]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const ip = btn.dataset.ip;
+      if (e.shiftKey || e.ctrlKey || e.metaKey) applyIpFilter(ip);
+      else openDrilldown(ip);
+    });
+  });
+
+  tbody.querySelectorAll('.ip-btn[data-country]').forEach(btn => {
+    btn.addEventListener('click', () => applyCountryFilter(btn.dataset.countryName, btn.dataset.country));
   });
 }
 
+function deltaString(current, previous) {
+  const cur = Number(current || 0);
+  const prev = Number(previous || 0);
+  const diff = cur - prev;
+  const sign = diff > 0 ? '+' : '';
+  return `${cur} (${sign}${diff})`;
+}
+
 function applySummary(data) {
-  setText('kAttacks', data.totals?.attacks || 0);
-  setText('kConnections', data.totals?.connections || 0);
-  setText('kBans', data.totals?.bans || 0);
-  setText('kSources', data.totals?.active_sources || 0);
-  setText('kWeb', data.totals?.web_requests || 0);
+  cache.summary = data;
+  if (state.compare && data.compare) {
+    setText('kAttacks', deltaString(data.totals?.attacks, data.compare.totals?.attacks));
+    setText('kConnections', deltaString(data.totals?.connections, data.compare.totals?.connections));
+    setText('kBans', deltaString(data.totals?.bans, data.compare.totals?.bans));
+    setText('kSources', deltaString(data.totals?.active_sources, data.compare.totals?.active_sources));
+    setText('kWeb', deltaString(data.totals?.web_requests, data.compare.totals?.web_requests));
+  } else {
+    setText('kAttacks', data.totals?.attacks || 0);
+    setText('kConnections', data.totals?.connections || 0);
+    setText('kBans', data.totals?.bans || 0);
+    setText('kSources', data.totals?.active_sources || 0);
+    setText('kWeb', data.totals?.web_requests || 0);
+  }
 
   const maxThreat = Math.max(0, ...(data.top_ips || []).map(x => Number(x.threat_score || 0)));
   setText('kThreat', maxThreat);
@@ -739,25 +951,22 @@ function applySummary(data) {
   const topAsn = (data.top_ips || []).find(x => x.asn && x.asn !== 'AS-UNK');
   setText('kAsn', topAsn ? topAsn.asn : 'AS-UNK');
 
-  document.getElementById('lastUpdate').textContent = 'Update: ' + new Date(data.generated_at).toLocaleTimeString();
+  if (!state.replay) {
+    document.getElementById('lastUpdate').textContent = 'Update: ' + new Date(data.generated_at).toLocaleTimeString();
+  }
 
-  renderTimeline(data.timeline || []);
+  renderTimeline(data);
   renderTopIps(data.top_ips || []);
   renderRows(data.recent || []);
 }
 
 function applyGeo(data) {
-  try {
-    renderGeo(
-      data.countries || [],
-      data.flows_connection || data.flows || [],
-      data.flows_attack || [],
-      data.target || null
-    );
-  } catch (_) {}
-  try {
-    renderAsn(data.top_asn || []);
-  } catch (_) {}
+  cache.geo = data;
+  if (!state.replay) {
+    renderGeo(data.countries || [], data.flows_connection || data.flows || [], data.flows_attack || [], data.target || null);
+  }
+  renderAsn(data.top_asn || []);
+  startReplay();
 }
 
 async function fetchSummary() {
@@ -775,6 +984,7 @@ async function fetchGeo() {
 }
 
 async function refreshAll() {
+  stopReplay();
   await Promise.all([fetchSummary(), fetchGeo()]);
 }
 
@@ -799,7 +1009,7 @@ function renderDrilldownCharts(data) {
     yAxis: { ...commonAxis(), type: 'value' },
     series: [
       { type: 'line', name: 'Total', smooth: 0.2, symbol: 'none', data: (data.timeline || []).map(x => x.total), lineStyle: { color: '#38bdf8' } },
-      { type: 'line', name: 'Attack', smooth: 0.2, symbol: 'none', data: (data.timeline || []).map(x => x.attacks), lineStyle: { color: '#fb7185' } }
+      { type: 'line', name: 'Attack', smooth: 0.2, symbol: 'none', data: (data.timeline || []).map(x => x.attacks), lineStyle: { color: severity.critical } }
     ]
   }, true);
 
@@ -849,7 +1059,7 @@ function connectStream() {
   const es = new EventSource('/api/stream');
   es.onmessage = (evt) => {
     try {
-      if (state.hours !== 24 || state.category !== 'all' || state.q) return;
+      if (state.hours !== 24 || state.category !== 'all' || state.q || state.compare || state.normalize || state.country || state.ip) return;
       const data = JSON.parse(evt.data);
       applySummary(data);
     } catch (_) {}
@@ -866,6 +1076,15 @@ function resizeCharts() {
   });
 }
 
+function syncControlsToState() {
+  document.getElementById('compareToggle').checked = state.compare;
+  document.getElementById('normalizeToggle').checked = state.normalize;
+  document.getElementById('timelineMode').value = state.timelineMode;
+  document.getElementById('mapMode').value = state.mapMode;
+  document.getElementById('mapTopN').value = String(state.mapTopN);
+  document.getElementById('replayToggle').checked = state.replay;
+}
+
 window.addEventListener('resize', resizeCharts);
 document.getElementById('refreshBtn').addEventListener('click', refreshAll);
 document.getElementById('closeDrawer').addEventListener('click', () => {
@@ -878,10 +1097,46 @@ document.getElementById('applyBtn').addEventListener('click', () => {
   state.q = document.getElementById('search').value.trim();
   refreshAll();
 });
+
 document.getElementById('search').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') document.getElementById('applyBtn').click();
 });
 
+document.getElementById('compareToggle').addEventListener('change', (e) => {
+  state.compare = !!e.target.checked;
+  refreshAll();
+});
+document.getElementById('normalizeToggle').addEventListener('change', (e) => {
+  state.normalize = !!e.target.checked;
+  if (cache.summary) applySummary(cache.summary);
+});
+document.getElementById('timelineMode').addEventListener('change', (e) => {
+  state.timelineMode = e.target.value;
+  if (cache.summary) renderTimeline(cache.summary);
+});
+document.getElementById('mapMode').addEventListener('change', (e) => {
+  state.mapMode = e.target.value;
+  if (cache.geo && !state.replay) renderGeo(cache.geo.countries || [], cache.geo.flows_connection || [], cache.geo.flows_attack || [], cache.geo.target || null);
+});
+document.getElementById('mapTopN').addEventListener('change', (e) => {
+  state.mapTopN = Number(e.target.value || 50);
+  refreshAll();
+});
+document.getElementById('replayToggle').addEventListener('change', (e) => {
+  state.replay = !!e.target.checked;
+  if (!state.replay && cache.geo) {
+    stopReplay();
+    renderGeo(cache.geo.countries || [], cache.geo.flows_connection || [], cache.geo.flows_attack || [], cache.geo.target || null);
+    document.getElementById('lastUpdate').textContent = 'Update: ' + new Date().toLocaleTimeString();
+    return;
+  }
+  startReplay();
+});
+
+document.getElementById('activeFilter').addEventListener('dblclick', clearScopeFilters);
+
+updateScopeChip();
+syncControlsToState();
 refreshAll();
 connectStream();
 setInterval(() => {

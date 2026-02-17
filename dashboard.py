@@ -440,9 +440,27 @@ def apply_enrichment(rows, max_remote=REMOTE_ENRICH_BUDGET):
     return out
 
 
-def build_where(hours, category='all', query=''):
+def compute_window(hours):
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(hours=hours)
+    return start_dt, end_dt
+
+
+def choose_bucket_minutes(hours):
+    if hours <= 6:
+        return 5
+    if hours <= 48:
+        return 15
+    return 60
+
+
+def build_where(hours, category='all', query='', start_iso=None, end_iso=None, country=None, ip=None):
     conditions = ['ts >= ?']
-    params = [window_start(hours)]
+    params = [start_iso or window_start(hours)]
+
+    if end_iso:
+        conditions.append('ts <= ?')
+        params.append(end_iso)
 
     if category != 'all':
         conditions.append('category = ?')
@@ -453,11 +471,36 @@ def build_where(hours, category='all', query=''):
         like = f'%{query}%'
         params.extend([like, like, like, like])
 
+    if country:
+        conditions.append('(COALESCE(country_code, "") = ? OR COALESCE(country_name, "") = ?)')
+        params.extend([country.upper(), country])
+
+    if ip:
+        conditions.append('COALESCE(ip, "") = ?')
+        params.append(ip)
+
     return ' AND '.join(conditions), params
 
 
-def build_summary(hours=24, limit=150, category='all', query=''):
-    where, params = build_where(hours, category=category, query=query)
+def build_summary(hours=24, limit=150, category='all', query='', compare=False, country=None, ip=None):
+    start_dt, end_dt = compute_window(hours)
+    start_iso = start_dt.isoformat()
+    end_iso = end_dt.isoformat()
+    where, params = build_where(
+        hours,
+        category=category,
+        query=query,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        country=country,
+        ip=ip,
+    )
+    bucket_minutes = choose_bucket_minutes(hours)
+    bucket_seconds = bucket_minutes * 60
+    slot_expr = (
+        f"strftime('%Y-%m-%d %H:%M', datetime((CAST(strftime('%s', ts) AS INTEGER) / {bucket_seconds}) "
+        f"* {bucket_seconds}, 'unixepoch'))"
+    )
 
     totals = q(
         f"""
@@ -505,13 +548,13 @@ def build_summary(hours=24, limit=150, category='all', query=''):
 
     timeline = q(
         f"""
-        SELECT strftime('%Y-%m-%d %H:%M', ts) AS slot,
+        SELECT {slot_expr} AS slot,
                COALESCE(SUM(CASE WHEN category='attack' THEN 1 ELSE 0 END), 0) AS attacks,
                COALESCE(SUM(CASE WHEN category='connection' THEN 1 ELSE 0 END), 0) AS connections,
                COALESCE(SUM(CASE WHEN source IN ('nginx','apache') THEN 1 ELSE 0 END), 0) AS web
         FROM events
         WHERE {where}
-        GROUP BY strftime('%Y-%m-%d %H:%M', ts)
+        GROUP BY {slot_expr}
         ORDER BY slot ASC
         """,
         params,
@@ -542,20 +585,85 @@ def build_summary(hours=24, limit=150, category='all', query=''):
     )
     recent = apply_enrichment(recent, max_remote=4)
 
+    compare_payload = None
+    if compare:
+        prev_end_dt = start_dt
+        prev_start_dt = prev_end_dt - timedelta(hours=hours)
+        prev_where, prev_params = build_where(
+            hours,
+            category=category,
+            query=query,
+            start_iso=prev_start_dt.isoformat(),
+            end_iso=prev_end_dt.isoformat(),
+            country=country,
+            ip=ip,
+        )
+        prev_totals = q(
+            f"""
+            SELECT
+              COALESCE(SUM(CASE WHEN category='attack' THEN 1 ELSE 0 END), 0) AS attacks,
+              COALESCE(SUM(CASE WHEN category='connection' THEN 1 ELSE 0 END), 0) AS connections,
+              COALESCE(SUM(CASE WHEN action='ip_banned' THEN 1 ELSE 0 END), 0) AS bans,
+              COALESCE(COUNT(DISTINCT CASE WHEN ip IS NOT NULL THEN ip END), 0) AS active_sources,
+              COALESCE(SUM(CASE WHEN source IN ('nginx','apache') THEN 1 ELSE 0 END), 0) AS web_requests
+            FROM events
+            WHERE {prev_where}
+            """,
+            prev_params,
+        )[0]
+        prev_timeline = q(
+            f"""
+            SELECT {slot_expr} AS slot,
+                   COALESCE(SUM(CASE WHEN category='attack' THEN 1 ELSE 0 END), 0) AS attacks,
+                   COALESCE(SUM(CASE WHEN category='connection' THEN 1 ELSE 0 END), 0) AS connections,
+                   COALESCE(SUM(CASE WHEN source IN ('nginx','apache') THEN 1 ELSE 0 END), 0) AS web
+            FROM events
+            WHERE {prev_where}
+            GROUP BY {slot_expr}
+            ORDER BY slot ASC
+            """,
+            prev_params,
+        )
+        compare_payload = {
+            'window_hours': hours,
+            'start': prev_start_dt.isoformat(),
+            'end': prev_end_dt.isoformat(),
+            'totals': prev_totals,
+            'timeline': prev_timeline,
+        }
+
     return {
         'generated_at': to_iso_now(),
         'window_hours': hours,
-        'filters': {'category': category, 'query': query},
+        'window': {'start': start_iso, 'end': end_iso, 'bucket_minutes': bucket_minutes},
+        'filters': {'category': category, 'query': query, 'country': country or '', 'ip': ip or ''},
         'totals': totals,
         'top_ips': top_ips,
         'top_countries': top_countries,
         'timeline': timeline,
         'recent': recent,
+        'compare': compare_payload,
     }
 
 
-def build_geo(hours=24):
-    where, params = build_where(hours, category='all', query='')
+def build_geo(hours=24, category='all', query='', topn=35, country=None, ip=None, replay_bucket=30):
+    start_dt, end_dt = compute_window(hours)
+    where, params = build_where(
+        hours,
+        category=category,
+        query=query,
+        start_iso=start_dt.isoformat(),
+        end_iso=end_dt.isoformat(),
+        country=country,
+        ip=ip,
+    )
+    topn = max(5, min(int(topn), 80))
+    replay_bucket = max(5, min(int(replay_bucket), 180))
+    replay_seconds = replay_bucket * 60
+    replay_slot_expr = (
+        f"strftime('%Y-%m-%d %H:%M', datetime((CAST(strftime('%s', ts) AS INTEGER) / {replay_seconds}) "
+        f"* {replay_seconds}, 'unixepoch'))"
+    )
 
     likely_ips = q(
         f"""
@@ -580,9 +688,9 @@ def build_geo(hours=24):
         WHERE {where} AND category='connection' AND ip IS NOT NULL
         GROUP BY COALESCE(ip, '-')
         ORDER BY count DESC
-        LIMIT 35
+        LIMIT ?
         """,
-        params,
+        params + [topn],
     )
     flow_ips_attack = q(
         f"""
@@ -594,9 +702,9 @@ def build_geo(hours=24):
         WHERE {where} AND category='attack' AND ip IS NOT NULL
         GROUP BY COALESCE(ip, '-')
         ORDER BY count DESC
-        LIMIT 35
+        LIMIT ?
         """,
-        params,
+        params + [topn],
     )
     flow_ips_conn = apply_enrichment(flow_ips_conn, max_remote=10)
     flow_ips_attack = apply_enrichment(flow_ips_attack, max_remote=10)
@@ -667,9 +775,25 @@ def build_geo(hours=24):
         params,
     )
 
+    country_timeline = q(
+        f"""
+        SELECT {replay_slot_expr} AS slot,
+               COALESCE(country_code, '--') AS country_code,
+               COALESCE(country_name, 'Unknown') AS country_name,
+               COUNT(*) AS count,
+               COALESCE(SUM(CASE WHEN category='attack' THEN 1 ELSE 0 END), 0) AS attacks
+        FROM events
+        WHERE {where}
+        GROUP BY {replay_slot_expr}, COALESCE(country_code, '--'), COALESCE(country_name, 'Unknown')
+        ORDER BY slot ASC
+        """,
+        params,
+    )
+
     return {
         'generated_at': to_iso_now(),
         'window_hours': hours,
+        'window': {'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'replay_bucket_minutes': replay_bucket},
         'countries': countries,
         'top_asn': asn,
         'target': {
@@ -680,6 +804,7 @@ def build_geo(hours=24):
         'flows': flows_connection,
         'flows_connection': flows_connection,
         'flows_attack': flows_attack,
+        'country_timeline': country_timeline,
     }
 
 
@@ -808,13 +933,42 @@ def summary():
     category = request.args.get('category', 'all')
     query = request.args.get('q', '').strip()
     limit = int(request.args.get('limit', 150))
-    return jsonify(build_summary(hours=hours, limit=limit, category=category, query=query))
+    compare = request.args.get('compare', '0') in ('1', 'true', 'yes', 'on')
+    country = request.args.get('country', '').strip()
+    ip = request.args.get('ip', '').strip()
+    return jsonify(
+        build_summary(
+            hours=hours,
+            limit=limit,
+            category=category,
+            query=query,
+            compare=compare,
+            country=country or None,
+            ip=ip or None,
+        )
+    )
 
 
 @app.route('/api/geo')
 def geo():
     hours = max(1, min(int(request.args.get('hours', 24)), 24 * 14))
-    return jsonify(build_geo(hours=hours))
+    category = request.args.get('category', 'all')
+    query = request.args.get('q', '').strip()
+    topn = int(request.args.get('topn', 35))
+    replay_bucket = int(request.args.get('replay_bucket', 30))
+    country = request.args.get('country', '').strip()
+    ip = request.args.get('ip', '').strip()
+    return jsonify(
+        build_geo(
+            hours=hours,
+            category=category,
+            query=query,
+            topn=topn,
+            country=country or None,
+            ip=ip or None,
+            replay_bucket=replay_bucket,
+        )
+    )
 
 
 @app.route('/api/ip/<path:ip>')

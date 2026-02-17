@@ -8,6 +8,10 @@ It ingests system and web logs, stores normalized events in SQLite, and serves a
 - Top ASNs and source IPs
 - Live event feed with threat overlays
 - IP drilldown with behavior and enrichment context
+- Compare mode (current window vs previous window)
+- Timeline zoom/brush, stacked mode, and rate normalization
+- Source-map Top-N filtering, cluster-aware flow rendering, heat/arcs toggle, and replay mode
+- Bidirectional map/table filtering (country + IP scope)
 
 ## Screenshots
 
